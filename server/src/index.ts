@@ -71,10 +71,20 @@ app.get('/api/queues', async (_req, res) => {
   res.json(q);
 });
 
+app.get('/api/accounts/ranks', (_req, res) => {
+  const ranks: Record<string, string> = {};
+  getAccounts().forEach(a => {
+    if (a.role === 'player' && a.rank) {
+      ranks[a.name] = a.rank;
+    }
+  });
+  res.json(ranks);
+});
+
 // Debug: list all in-memory accounts (username, hashed/plain password stored in memory)
 app.get('/api/admin/accounts', (_req, res) => {
   try {
-    const list = getAccounts().map(a => ({ id: a.id, name: a.name, username: a.username, password: a.password, role: a.role, clubName: a.clubName }));
+    const list = getAccounts().map(a => ({ id: a.id, name: a.name, username: a.username, password: a.password, role: a.role, clubName: a.clubName, rank: a.rank }));
     res.json(list);
   } catch (err) {
     res.status(500).json({ error: 'Unable to read accounts' });

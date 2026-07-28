@@ -251,12 +251,34 @@ export default function App() {
   const [accountPassword, setAccountPassword] = useState('')
   const [accountRole, setAccountRole] = useState<'qm' | 'player'>('player')
   const [accountClubName, setAccountClubName] = useState('')
+  const [accountRank, setAccountRank] = useState('Beginner')
+  const [playerRanks, setPlayerRanks] = useState<Record<string, string>>({})
+  const [showDatePicker, setShowDatePicker] = useState(false)
+  const [showTimePicker, setShowTimePicker] = useState(false)
+  const [showDurationPicker, setShowDurationPicker] = useState(false)
+  const [currentCalendarMonth, setCurrentCalendarMonth] = useState(new Date())
   const [authMessage, setAuthMessage] = useState('')
-  const [activeAccount, setActiveAccount] = useState<{ id: string; name: string; username: string; role: Role; clubName?: string } | null>(null)
+  const [activeAccount, setActiveAccount] = useState<{ id: string; name: string; username: string; role: Role; clubName?: string; rank?: string } | null>(null)
   const [selectedSlot, setSelectedSlot] = useState('6:00 PM - 7:00 PM')
   const [startTime, setStartTime] = useState('6:00 PM')
   const [durationHours, setDurationHours] = useState(3)
   const [selectedDate, setSelectedDate] = useState(new Date().toISOString().slice(0, 10))
+
+  const calendarDays = useMemo(() => {
+    const year = currentCalendarMonth.getFullYear();
+    const month = currentCalendarMonth.getMonth(); // 0-indexed
+    const firstDayIndex = new Date(year, month, 1).getDay();
+    const totalDays = new Date(year, month + 1, 0).getDate();
+    
+    const days: (number | null)[] = [];
+    for (let i = 0; i < firstDayIndex; i++) {
+      days.push(null);
+    }
+    for (let d = 1; d <= totalDays; d++) {
+      days.push(d);
+    }
+    return days;
+  }, [currentCalendarMonth]);
 
   const computedSlot = useMemo(() => {
     return computeTimeSlot(startTime, durationHours)
@@ -338,6 +360,83 @@ export default function App() {
     })
   }, [bookings, assignments, qmName, activeAccount, role, selectedDate, visibleCourts])
 
+  const qmBookedCourtsAll = useMemo(() => {
+    if (role !== 'qm') return visibleCourts
+    const qmNameId = (activeAccount?.name || qmName || '').trim().toLowerCase()
+    const qmClubId = (activeAccount?.clubName || '').trim().toLowerCase()
+    return visibleCourts.filter(court => {
+      const courtBookings = bookings[court.id] ?? []
+      const isBookedByQm = courtBookings.some(entry => {
+        const entryName = entry.name.trim().toLowerCase()
+        if (qmClubId && (entryName === qmClubId || entryName.includes(qmClubId) || qmClubId.includes(entryName))) return true
+        if (qmNameId && (entryName === qmNameId || entryName.includes(qmNameId) || qmNameId.includes(entryName))) return true
+        return false
+      })
+      return isBookedByQm
+    })
+  }, [bookings, qmName, activeAccount, role, visibleCourts])
+
+  const isBookingActiveNow = (courtId: string) => {
+    const list = bookings[courtId] ?? []
+    const todayStr = new Date().toLocaleDateString('en-CA') // YYYY-MM-DD local format
+    const now = new Date()
+    return list.some(b => {
+      if (b.date !== todayStr) return false
+      try {
+        const parts = b.slot.split(' - ')
+        if (parts.length !== 2) return false
+        const start = getBookingStartTimeDate(b.date, parts[0])
+        const end = getBookingStartTimeDate(b.date, parts[1])
+        if (!start || !end) return false
+        return now >= start && now <= end
+      } catch (e) {
+        return false
+      }
+    })
+  }
+
+  const isTimeOptionBookedOut = (timeOption: string) => {
+    const activeCourts = courts.filter(c => c.active);
+    if (activeCourts.length === 0) return false;
+
+    const proposedStart = parseHour(timeOption);
+    const proposedEnd = proposedStart + durationHours;
+
+    const unavailableCourtsCount = activeCourts.filter(court => {
+      const courtBookings = (bookings[court.id] ?? []).filter(b => b.date === selectedDate);
+      return courtBookings.some(b => {
+        try {
+          const parts = b.slot.split(' - ');
+          if (parts.length !== 2) return false;
+          const bStart = parseHour(parts[0]);
+          const bEnd = parseHour(parts[1]);
+          // Check overlap
+          const startMax = Math.max(proposedStart, bStart);
+          const endMin = Math.min(proposedEnd, bEnd);
+          return startMax < endMin;
+        } catch (e) {
+          return false;
+        }
+      });
+    }).length;
+
+    return unavailableCourtsCount >= activeCourts.length;
+  };
+
+  const isTimeOptionDisabled = (timeOption: string) => {
+    const todayStr = new Date().toLocaleDateString('en-CA');
+    if (selectedDate === todayStr) {
+      const now = new Date();
+      const currentHour = now.getHours();
+      const currentMinute = now.getMinutes();
+      const optionStartHour = parseHour(timeOption);
+      if (optionStartHour < currentHour || (optionStartHour === currentHour && currentMinute > 0)) {
+        return true;
+      }
+    }
+    return isTimeOptionBookedOut(timeOption);
+  };
+
   const totalPlayersInQueue = useMemo(() => {
     return Object.values(queues).reduce((sum, list) => sum + (list?.length || 0), 0)
   }, [queues])
@@ -345,16 +444,18 @@ export default function App() {
   useEffect(() => {
     async function bootstrap() {
       try {
-        const [statusRes, bookingsRes, historyRes, matchupsRes] = await Promise.all([
+        const [statusRes, bookingsRes, historyRes, matchupsRes, ranksRes] = await Promise.all([
           fetch('/api/status'),
           fetch('/api/bookings'),
           fetch('/api/matches/history'),
           fetch('/api/matchups'),
+          fetch('/api/accounts/ranks'),
         ])
         const statusData = await statusRes.json()
         const bookingsData = await bookingsRes.json()
         const historyData = await historyRes.json()
         const matchupsData = await matchupsRes.json()
+        const ranksData = await ranksRes.json()
         setQueues(statusData.queues)
         setAvailability(statusData.availability)
         setCourts(statusData.courts ?? [])
@@ -363,6 +464,7 @@ export default function App() {
         setBookings(bookingsData)
         setMatchHistory(historyData)
         setMatchups(matchupsData)
+        setPlayerRanks(ranksData)
         if (statusData.courts?.length) {
           if (!selectedCourt) setSelectedCourt(statusData.courts[0].id)
           setBuilderCourt(statusData.courts[0].id)
@@ -561,6 +663,7 @@ export default function App() {
       password: accountPassword.trim(),
       role: accountRole,
       ...(accountRole === 'qm' ? { clubName: accountClubName.trim() } : {}),
+      ...(accountRole === 'player' ? { rank: accountRank } : {}),
     }
 
     const response = await fetch('/api/accounts', {
@@ -575,8 +678,13 @@ export default function App() {
       return
     }
 
+    // Refresh ranks
+    const ranksRes = await fetch('/api/accounts/ranks')
+    const ranksData = await ranksRes.json().catch(() => ({}))
+    setPlayerRanks(ranksData)
+
     setAuthMessage(`Account created for ${data.name}!`)
-    setActiveAccount({ id: data.id, name: data.name, username: data.username, role: data.role, clubName: data.clubName })
+    setActiveAccount({ id: data.id, name: data.name, username: data.username, role: data.role, clubName: data.clubName, rank: data.rank })
     setRole(data.role)
     if (data.role === 'qm') {
       setQmName(data.name)
@@ -608,8 +716,13 @@ export default function App() {
       return
     }
 
+    // Refresh ranks
+    const ranksRes = await fetch('/api/accounts/ranks')
+    const ranksData = await ranksRes.json().catch(() => ({}))
+    setPlayerRanks(ranksData)
+
     setAuthMessage(`Welcome back, ${data.name}!`)
-    setActiveAccount({ id: data.id, name: data.name, username: data.username, role: data.role, clubName: data.clubName })
+    setActiveAccount({ id: data.id, name: data.name, username: data.username, role: data.role, clubName: data.clubName, rank: data.rank })
     setRole(data.role)
     if (data.role === 'qm') {
       setQmName(data.name)
@@ -842,14 +955,30 @@ export default function App() {
                     </div>
                     <div>
                       <label className="mb-1.5 block text-xs font-semibold text-slate-300">Account Type</label>
-                      <select
-                        className="glass-input w-full rounded-2xl px-4 py-3 text-sm text-white bg-slate-950"
-                        value={accountRole}
-                        onChange={e => setAccountRole(e.target.value as 'qm' | 'player')}
-                      >
-                        <option value="player">Player (Join queues & view courts)</option>
-                        <option value="qm">Queue Manager / QM (Organize court matches)</option>
-                      </select>
+                      <div className="flex gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setAccountRole('player')}
+                          className={`flex-1 rounded-2xl py-3 px-4 text-xs font-bold border transition-all ${
+                            accountRole === 'player'
+                              ? 'bg-sky-500/10 text-sky-400 border-sky-500/30 shadow-glow-cyan'
+                              : 'bg-slate-900/60 text-slate-400 border-white/5 hover:bg-slate-800'
+                          }`}
+                        >
+                          👤 Player
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setAccountRole('qm')}
+                          className={`flex-1 rounded-2xl py-3 px-4 text-xs font-bold border transition-all ${
+                            accountRole === 'qm'
+                              ? 'bg-amber-500/10 text-amber-400 border-amber-500/30 shadow-glow-amber'
+                              : 'bg-slate-900/60 text-slate-400 border-white/5 hover:bg-slate-800'
+                          }`}
+                        >
+                          ⚡ Queue Manager (QM)
+                        </button>
+                      </div>
                     </div>
                     {accountRole === 'qm' && (
                       <div className="animate-fade-in">
@@ -860,6 +989,27 @@ export default function App() {
                           value={accountClubName}
                           onChange={e => setAccountClubName(e.target.value)}
                         />
+                      </div>
+                    )}
+                    {accountRole === 'player' && (
+                      <div className="animate-fade-in space-y-1.5">
+                        <label className="block text-xs font-semibold text-sky-300">Badminton Skill Level / Rank</label>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          {['Beginner', 'Advanced Beginner', 'Low Intermediate', 'Intermediate', 'High Intermediate', 'Advanced'].map(rank => (
+                            <button
+                              key={rank}
+                              type="button"
+                              onClick={() => setAccountRank(rank)}
+                              className={`rounded-xl py-2 px-2 text-xs font-bold border transition-all truncate text-center ${
+                                accountRank === rank
+                                  ? 'bg-sky-500/20 text-sky-300 border-sky-500/50 shadow-glow-cyan'
+                                  : 'bg-slate-900/65 text-slate-400 border-white/5 hover:bg-slate-850'
+                              }`}
+                            >
+                              {rank}
+                            </button>
+                          ))}
+                        </div>
                       </div>
                     )}
                     <button
@@ -1052,8 +1202,16 @@ export default function App() {
             </div>
 
             {(() => {
-              const courtsWithBookings = qmVisibleCourts.filter(court => {
-                const bookingEntries = bookings[court.id] ?? [];
+              const qmNameId = (activeAccount?.name || qmName || '').trim().toLowerCase()
+              const qmClubId = (activeAccount?.clubName || '').trim().toLowerCase()
+
+              const courtsWithBookings = qmBookedCourtsAll.filter(court => {
+                const bookingEntries = (bookings[court.id] ?? []).filter(entry => {
+                  const entryName = entry.name.trim().toLowerCase()
+                  if (qmClubId && (entryName === qmClubId || entryName.includes(qmClubId) || qmClubId.includes(entryName))) return true
+                  if (qmNameId && (entryName === qmNameId || entryName.includes(qmNameId) || qmNameId.includes(entryName))) return true
+                  return false
+                })
                 return bookingEntries.length > 0;
               });
 
@@ -1071,7 +1229,12 @@ export default function App() {
               return (
                 <div className="mt-6 grid gap-6 md:grid-cols-2">
                   {courtsWithBookings.map(court => {
-                    const bookingEntries = bookings[court.id] ?? [];
+                    const bookingEntries = (bookings[court.id] ?? []).filter(entry => {
+                      const entryName = entry.name.trim().toLowerCase()
+                      if (qmClubId && (entryName === qmClubId || entryName.includes(qmClubId) || qmClubId.includes(entryName))) return true
+                      if (qmNameId && (entryName === qmNameId || entryName.includes(qmNameId) || qmNameId.includes(entryName))) return true
+                      return false
+                    });
                     return (
                       <div key={`qm-booked-${court.id}`} className="rounded-3xl border border-slate-800 bg-slate-950/70 p-5 space-y-4">
                         <div>
@@ -1091,17 +1254,45 @@ export default function App() {
                                   <span className="text-[10px] text-slate-400">📅 {b.date}</span>
                                   <span className="text-[10px] text-slate-500 font-mono">🕒 {b.slot}</span>
                                 </div>
-                                <button
-                                  disabled={(assignments[court.id] ?? []).length > 0}
-                                  onClick={() => cancel(court.id, b.slot, b.date)}
-                                  className={`rounded-lg px-2.5 py-1 text-[10px] font-semibold border transition-all ${(assignments[court.id] ?? []).length > 0
-                                    ? 'bg-slate-900/60 text-slate-650 border-slate-950 cursor-not-allowed'
-                                    : 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-455 border-rose-500/20'
-                                    }`}
-                                  title={(assignments[court.id] ?? []).length > 0 ? "Cannot cancel: game has started" : "Cancel booking"}
-                                >
-                                  Cancel Booking
-                                </button>
+                                {(() => {
+                                  const isThisBookingActiveNow = (() => {
+                                    const todayStr = new Date().toLocaleDateString('en-CA');
+                                    if (b.date !== todayStr) return false;
+                                    try {
+                                      const parts = b.slot.split(' - ');
+                                      if (parts.length !== 2) return false;
+                                      const start = getBookingStartTimeDate(b.date, parts[0]);
+                                      const end = getBookingStartTimeDate(b.date, parts[1]);
+                                      if (!start || !end) return false;
+                                      const now = new Date();
+                                      return now >= start && now <= end;
+                                    } catch (e) {
+                                      return false;
+                                    }
+                                  })();
+
+                                  const gameStarted = isThisBookingActiveNow && (assignments[court.id] ?? []).length > 0;
+                                  const tooLate = b.date === new Date().toLocaleDateString('en-CA') && !canCancelBooking(b.date, b.slot);
+                                  const disabled = gameStarted || tooLate;
+                                  let tooltip = "Cancel booking";
+                                  if (gameStarted) tooltip = "Cannot cancel: game has started";
+                                  else if (tooLate) tooltip = "Cannot cancel: less than 4 hours before slot time";
+
+                                  return (
+                                    <button
+                                      disabled={disabled}
+                                      onClick={() => cancel(court.id, b.slot, b.date)}
+                                      className={`rounded-lg px-2.5 py-1 text-[10px] font-semibold border transition-all ${
+                                        disabled
+                                          ? 'bg-slate-900/60 text-slate-650 border-slate-950 cursor-not-allowed'
+                                          : 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-455 border-rose-500/20'
+                                      }`}
+                                      title={tooltip}
+                                    >
+                                      Cancel Booking
+                                    </button>
+                                  );
+                                })()}
                               </div>
                             ))}
                           </div>
@@ -1138,36 +1329,200 @@ export default function App() {
                 </div>
                 <div>
                   <label className="mb-1 block text-xs text-slate-400">Target Date</label>
-                  <input
-                    type="date"
-                    value={selectedDate}
-                    onChange={e => setSelectedDate(e.target.value)}
-                    className="glass-input rounded-2xl px-4 py-2.5 text-xs sm:text-sm text-white w-full sm:w-40"
-                  />
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowDatePicker(!showDatePicker);
+                        setShowTimePicker(false);
+                        setShowDurationPicker(false);
+                      }}
+                      className="glass-input rounded-2xl px-4 py-2.5 text-xs sm:text-sm text-white w-full sm:w-40 text-left flex items-center justify-between gap-2 min-h-[42px] select-none"
+                    >
+                      <span>📅 {selectedDate}</span>
+                      <span className="text-[10px] text-slate-500 font-bold">▼</span>
+                    </button>
+                    
+                    {showDatePicker && (
+                      <div className="absolute right-0 sm:left-0 z-50 mt-2 p-4 rounded-2xl bg-slate-900 border border-white/10 shadow-2xl backdrop-blur-xl w-64 text-xs space-y-3">
+                        {/* Calendar Header */}
+                        <div className="flex items-center justify-between select-none">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const prev = new Date(currentCalendarMonth);
+                              prev.setMonth(prev.getMonth() - 1);
+                              setCurrentCalendarMonth(prev);
+                            }}
+                            className="text-slate-400 hover:text-white font-bold p-1 text-sm transition-colors"
+                          >
+                            ◀
+                          </button>
+                          <span className="font-bold text-white uppercase tracking-wider text-[11px]">
+                            {currentCalendarMonth.toLocaleString('default', { month: 'long', year: 'numeric' })}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next = new Date(currentCalendarMonth);
+                              next.setMonth(next.getMonth() + 1);
+                              setCurrentCalendarMonth(next);
+                            }}
+                            className="text-slate-400 hover:text-white font-bold p-1 text-sm transition-colors"
+                          >
+                            ▶
+                          </button>
+                        </div>
+                        {/* Weekdays Header */}
+                        <div className="grid grid-cols-7 gap-1 text-center font-bold text-slate-500 select-none text-[9px] uppercase">
+                          <span>Su</span><span>Mo</span><span>Tu</span><span>We</span><span>Th</span><span>Fr</span><span>Sa</span>
+                        </div>
+                        {/* Days Grid */}
+                        <div className="grid grid-cols-7 gap-1 text-center">
+                          {calendarDays.map((day, idx) => {
+                            if (day === null) {
+                              return <span key={`empty-${idx}`} />;
+                            }
+                            
+                            const year = currentCalendarMonth.getFullYear();
+                            const month = String(currentCalendarMonth.getMonth() + 1).padStart(2, '0');
+                            const dateStr = `${year}-${month}-${String(day).padStart(2, '0')}`;
+                            const isSelected = selectedDate === dateStr;
+                            const isToday = new Date().toLocaleDateString('en-CA') === dateStr;
+
+                            const todayStr = new Date().toLocaleDateString('en-CA');
+                            const isPast = dateStr < todayStr;
+
+                            return (
+                              <button
+                                type="button"
+                                key={`day-${day}`}
+                                disabled={isPast}
+                                onClick={() => {
+                                  setSelectedDate(dateStr);
+                                  setShowDatePicker(false);
+                                }}
+                                className={`h-7 w-7 rounded-lg flex items-center justify-center font-bold transition-all ${
+                                  isSelected
+                                    ? 'bg-cyan-500 text-slate-950 font-black scale-105 shadow-glow-cyan'
+                                    : isPast
+                                    ? 'text-slate-700 cursor-not-allowed opacity-30 select-none'
+                                    : isToday
+                                    ? 'border border-cyan-500/50 text-cyan-400'
+                                    : 'text-slate-300 hover:bg-slate-800 hover:text-white'
+                                }`}
+                              >
+                                {day}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        {/* Footer helper */}
+                        <div className="flex items-center justify-between border-t border-white/5 pt-2 select-none">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setSelectedDate(new Date().toLocaleDateString('en-CA'));
+                              setCurrentCalendarMonth(new Date());
+                              setShowDatePicker(false);
+                            }}
+                            className="text-[10px] text-cyan-400 hover:underline"
+                          >
+                            Go to Today
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setShowDatePicker(false)}
+                            className="text-[10px] text-slate-400 hover:text-white"
+                          >
+                            Close
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <label className="mb-1 block text-xs text-slate-400">Start Time</label>
-                  <select
-                    value={startTime}
-                    onChange={e => setStartTime(e.target.value)}
-                    className="glass-input rounded-2xl px-3 py-2.5 text-xs sm:text-sm text-white bg-slate-950 w-full sm:w-32"
-                  >
-                    {TIME_OPTIONS.map(time => (
-                      <option key={time} value={time}>{time}</option>
-                    ))}
-                  </select>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowTimePicker(!showTimePicker);
+                        setShowDatePicker(false);
+                        setShowDurationPicker(false);
+                      }}
+                      className="glass-input rounded-2xl px-4 py-2.5 text-xs sm:text-sm text-white w-full sm:w-32 text-left flex items-center justify-between gap-2 min-h-[42px] select-none"
+                    >
+                      <span>🕒 {startTime}</span>
+                      <span className="text-[10px] text-slate-500 font-bold">▼</span>
+                    </button>
+                    
+                    {showTimePicker && (
+                      <div className="absolute right-0 sm:left-0 z-50 mt-2 max-h-56 overflow-y-auto rounded-2xl bg-slate-900 border border-white/10 shadow-2xl backdrop-blur-xl w-36 text-xs divide-y divide-white/5 pr-1 py-1">
+                        {TIME_OPTIONS.map(time => {
+                          const disabled = isTimeOptionDisabled(time);
+                          return (
+                            <button
+                              key={time}
+                              type="button"
+                              disabled={disabled}
+                              onClick={() => {
+                                setStartTime(time);
+                                setShowTimePicker(false);
+                              }}
+                              className={`w-full text-left py-2 px-3 transition-colors font-bold ${
+                                disabled
+                                  ? 'text-slate-700 line-through opacity-40 cursor-not-allowed'
+                                  : startTime === time
+                                  ? 'text-cyan-400 bg-cyan-950/20'
+                                  : 'text-slate-300 hover:bg-slate-800'
+                              }`}
+                            >
+                              {time}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
                 </div>
                 <div>
                   <label className="mb-1 block text-xs text-slate-400">Duration</label>
-                  <select
-                    value={durationHours}
-                    onChange={e => setDurationHours(Number(e.target.value))}
-                    className="glass-input rounded-2xl px-3 py-2.5 text-xs sm:text-sm text-white bg-slate-950 w-full sm:w-32"
-                  >
-                    {DURATION_OPTIONS.map(hrs => (
-                      <option key={hrs} value={hrs}>{hrs} Hour{hrs === 1 ? '' : 's'}</option>
-                    ))}
-                  </select>
+                  <div className="relative">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowDurationPicker(!showDurationPicker);
+                        setShowDatePicker(false);
+                        setShowTimePicker(false);
+                      }}
+                      className="glass-input rounded-2xl px-4 py-2.5 text-xs sm:text-sm text-white w-full sm:w-32 text-left flex items-center justify-between gap-2 min-h-[42px] select-none"
+                    >
+                      <span>⏳ {durationHours} Hour{durationHours === 1 ? '' : 's'}</span>
+                      <span className="text-[10px] text-slate-500 font-bold">▼</span>
+                    </button>
+                    
+                    {showDurationPicker && (
+                      <div className="absolute right-0 sm:left-0 z-50 mt-2 rounded-2xl bg-slate-900 border border-white/10 shadow-2xl backdrop-blur-xl w-32 text-xs divide-y divide-white/5 py-1">
+                        {DURATION_OPTIONS.map(hrs => (
+                          <button
+                            key={hrs}
+                            type="button"
+                            onClick={() => {
+                              setDurationHours(hrs);
+                              setShowDurationPicker(false);
+                            }}
+                            className={`w-full text-left py-2.5 px-3.5 hover:bg-slate-800 transition-colors font-bold ${
+                              durationHours === hrs ? 'text-cyan-400' : 'text-slate-300'
+                            }`}
+                          >
+                            {hrs} Hour{hrs === 1 ? '' : 's'}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
             </div>
@@ -1316,27 +1671,28 @@ export default function App() {
                       <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider text-center select-none">Team A</span>
                       <div className="space-y-2">
                         {builderTeamA.map((val, idx) => (
-                          <select
-                            key={`teamA-${idx}`}
-                            value={val}
-                            onChange={e => {
-                              const next = [...builderTeamA];
-                              next[idx] = e.target.value;
-                              setBuilderTeamA(next);
-                            }}
-                            className="glass-input w-full rounded-xl py-2 px-2.5 text-xs text-white bg-slate-900"
+                          <div
+                            key={`teamA-slot-${idx}`}
+                            className={`rounded-xl border p-2 flex items-center justify-between text-xs min-h-[38px] ${
+                              val
+                                ? 'bg-indigo-500/10 border-indigo-500/30 text-indigo-300'
+                                : 'bg-slate-900/40 border-dashed border-slate-850 text-slate-500'
+                            }`}
                           >
-                            <option value="">-- Choose Player --</option>
-                            {allCheckedInPlayers.map(p => {
-                              const stats = playerStats[p] || { wins: 0, losses: 0, total: 0 };
-                              const isPicked = builderTeamA.includes(p) || builderTeamB.includes(p);
-                              return (
-                                <option key={p} value={p} disabled={isPicked && val !== p} className="bg-slate-950">
-                                  {p} (W:{stats.wins}|L:{stats.losses}|G:{stats.total})
-                                </option>
-                              );
-                            })}
-                          </select>
+                            <span className="truncate">{val ? `👤 ${val}` : `Empty Slot ${idx + 1}`}</span>
+                            {val && (
+                              <button
+                                onClick={() => {
+                                  const next = [...builderTeamA];
+                                  next[idx] = '';
+                                  setBuilderTeamA(next);
+                                }}
+                                className="text-slate-400 hover:text-slate-200 font-bold px-1 select-none text-sm"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </div>
                         ))}
                       </div>
                     </div>
@@ -1348,28 +1704,115 @@ export default function App() {
                       <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider text-center select-none">Team B</span>
                       <div className="space-y-2">
                         {builderTeamB.map((val, idx) => (
-                          <select
-                            key={`teamB-${idx}`}
-                            value={val}
-                            onChange={e => {
-                              const next = [...builderTeamB];
-                              next[idx] = e.target.value;
-                              setBuilderTeamB(next);
-                            }}
-                            className="glass-input w-full rounded-xl py-2 px-2.5 text-xs text-white bg-slate-900"
+                          <div
+                            key={`teamB-slot-${idx}`}
+                            className={`rounded-xl border p-2 flex items-center justify-between text-xs min-h-[38px] ${
+                              val
+                                ? 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                                : 'bg-slate-900/40 border-dashed border-slate-850 text-slate-500'
+                            }`}
                           >
-                            <option value="">-- Choose Player --</option>
-                            {allCheckedInPlayers.map(p => {
-                              const stats = playerStats[p] || { wins: 0, losses: 0, total: 0 };
-                              const isPicked = builderTeamA.includes(p) || builderTeamB.includes(p);
-                              return (
-                                <option key={p} value={p} disabled={isPicked && val !== p} className="bg-slate-950">
-                                  {p} (W:{stats.wins}|L:{stats.losses}|G:{stats.total})
-                                </option>
-                              );
-                            })}
-                          </select>
+                            <span className="truncate">{val ? `👤 ${val}` : `Empty Slot ${idx + 1}`}</span>
+                            {val && (
+                              <button
+                                onClick={() => {
+                                  const next = [...builderTeamB];
+                                  next[idx] = '';
+                                  setBuilderTeamB(next);
+                                }}
+                                className="text-slate-400 hover:text-slate-200 font-bold px-1 select-none text-sm"
+                              >
+                                ×
+                              </button>
+                            )}
+                          </div>
                         ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Quick-Click Player Selection Panel */}
+                  <div className="space-y-3 bg-slate-950/30 rounded-2xl p-4 border border-white/5">
+                    <span className="text-xs font-bold text-slate-400 block select-none">
+                      💡 Click a waiting player below to add them to a slot:
+                    </span>
+                    <div className="overflow-x-auto rounded-2xl border border-white/5 bg-slate-950/40 p-3">
+                      <div className="flex gap-3 min-w-max pb-1">
+                        {['Advanced', 'High Intermediate', 'Intermediate', 'Low Intermediate', 'Advanced Beginner', 'Beginner', 'Unranked'].map(rankGroup => {
+                          const playersInGroup = allCheckedInPlayers.filter(p => {
+                            const pRank = playerRanks[p] || 'Unranked';
+                            return pRank === rankGroup;
+                          });
+
+                          return (
+                            <div key={`col-${rankGroup}`} className="rounded-xl border border-white/5 bg-slate-900/40 p-2.5 flex flex-col w-36 min-h-[140px] max-h-64 space-y-2">
+                              {/* Column Header */}
+                              <div className="border-b border-white/10 pb-1.5 flex items-center justify-between text-[9px] uppercase font-bold text-slate-400 select-none">
+                                <span className="truncate" title={rankGroup}>{rankGroup}</span>
+                                <span className="ml-1 rounded-full bg-slate-800 text-slate-300 px-1 py-0.25 text-[8px] font-medium">
+                                  {playersInGroup.length}
+                                </span>
+                              </div>
+                              {/* Column Content */}
+                              <div className="flex flex-col gap-1.5 overflow-y-auto pr-0.5 flex-1">
+                                {playersInGroup.length === 0 ? (
+                                  <span className="text-[10px] text-slate-650 italic text-center py-4 select-none">Empty</span>
+                                ) : (
+                                  playersInGroup.map(p => {
+                                    const stats = playerStats[p] || { wins: 0, losses: 0, total: 0 };
+                                    const inTeamA = builderTeamA.includes(p);
+                                    const inTeamB = builderTeamB.includes(p);
+                                    const isSelected = inTeamA || inTeamB;
+
+                                    const handleAddPlayer = () => {
+                                      if (isSelected) {
+                                        // Toggle off/remove player
+                                        setBuilderTeamA(builderTeamA.map(x => x === p ? '' : x));
+                                        setBuilderTeamB(builderTeamB.map(x => x === p ? '' : x));
+                                        return;
+                                      }
+                                      // Try to slot into Team A first
+                                      const emptyA = builderTeamA.indexOf('');
+                                      if (emptyA !== -1) {
+                                        const next = [...builderTeamA];
+                                        next[emptyA] = p;
+                                        setBuilderTeamA(next);
+                                        return;
+                                      }
+                                      // If A is full, slot into Team B
+                                      const emptyB = builderTeamB.indexOf('');
+                                      if (emptyB !== -1) {
+                                        const next = [...builderTeamB];
+                                        next[emptyB] = p;
+                                        setBuilderTeamB(next);
+                                        return;
+                                      }
+                                    };
+
+                                    return (
+                                      <button
+                                        key={`builder-select-${p}`}
+                                        onClick={handleAddPlayer}
+                                        className={`flex flex-col items-center justify-center rounded-xl p-1.5 text-[11px] border font-bold transition-all hover:scale-[1.02] active:scale-[0.98] text-center ${
+                                          inTeamA
+                                            ? 'bg-indigo-500/20 text-indigo-300 border-indigo-500/40 shadow-glow-indigo'
+                                            : inTeamB
+                                            ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 shadow-glow-rose'
+                                            : 'bg-slate-900 hover:bg-slate-850 text-slate-200 border-white/5'
+                                        }`}
+                                      >
+                                        <span className="truncate w-full">{p}</span>
+                                        <span className="text-[8px] opacity-60 font-mono mt-0.5">
+                                          W:{stats.wins} L:{stats.losses}
+                                        </span>
+                                      </button>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   </div>
@@ -1391,11 +1834,10 @@ export default function App() {
                 <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-2">
                   {(role === 'qm' ? qmVisibleCourts : visibleCourts).map(court => {
                     const theme = getSportTheme(court.sport)
-                    const list = queues[court.id] ?? []
+                    const assignedList = assignments[court.id] ?? []
                     const limit = court.matchType === 'singles' ? 2 : 4
-                    const isBusy = list.length >= limit
-                    // const bookingEntries = (bookings[court.id] ?? []).filter(entry => entry.date === selectedDate)
-                    const bookingEntries = (bookings[court.id] ?? [])
+                    const isBusy = assignedList.length >= limit
+                    const bookingEntries = (bookings[court.id] ?? []).filter(entry => entry.date === selectedDate)
 
                     return (
                       <article
@@ -1471,14 +1913,23 @@ export default function App() {
                                       🏆 Finish
                                     </button>
                                   ) : (
-                                    matchups.length > 0 && (
-                                      <button
-                                        onClick={() => startNextMatchOnCourt(court.id)}
-                                        className="rounded-full bg-cyan-500 hover:bg-cyan-400 px-2 py-0.5 text-[10px] font-bold text-slate-950 transition-all shadow-glow-cyan"
-                                      >
-                                        ⚡ Start Next
-                                      </button>
-                                    )
+                                    matchups.length > 0 && (() => {
+                                      const active = isBookingActiveNow(court.id);
+                                      return (
+                                        <button
+                                          disabled={!active}
+                                          onClick={() => startNextMatchOnCourt(court.id)}
+                                          className={`rounded-full px-2 py-0.5 text-[10px] font-bold transition-all ${
+                                            active
+                                              ? 'bg-cyan-500 hover:bg-cyan-400 text-slate-950 shadow-glow-cyan'
+                                              : 'bg-slate-800 text-slate-500 border border-slate-700 cursor-not-allowed'
+                                          }`}
+                                          title={active ? "Start the next queued match" : "Cannot start match: Not within booked date and time"}
+                                        >
+                                          ⚡ Start Next
+                                        </button>
+                                      );
+                                    })()
                                   )
                                 )}
                                 {(assignments[court.id] ?? []).length > 0 && role === 'player' && (
@@ -1511,17 +1962,6 @@ export default function App() {
                                         <span className="font-bold text-white">{b.name}</span>
                                         <span className="text-[10px] text-slate-400">🕒 {b.slot}</span>
                                       </div>
-                                      <button
-                                        disabled={(assignments[court.id] ?? []).length > 0}
-                                        onClick={() => cancel(court.id, b.slot, b.date)}
-                                        className={`rounded-lg px-2.5 py-1 text-[11px] font-semibold border transition-all ${(assignments[court.id] ?? []).length > 0
-                                          ? 'bg-slate-900/60 text-slate-650 border-slate-950 cursor-not-allowed'
-                                          : 'bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border-rose-500/20'
-                                          }`}
-                                        title={(assignments[court.id] ?? []).length > 0 ? "Cannot cancel: game has started" : "Cancel reservation"}
-                                      >
-                                        Cancel
-                                      </button>
                                     </div>
                                   ))}
                                 </div>
